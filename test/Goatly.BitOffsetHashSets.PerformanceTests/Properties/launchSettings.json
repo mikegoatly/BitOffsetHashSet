@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Goatly.BitOffsetHashSets.PerformanceTests": {
+      "commandName": "Project",
+      "commandLineArgs": "--join"
+    }
+  }
+}
