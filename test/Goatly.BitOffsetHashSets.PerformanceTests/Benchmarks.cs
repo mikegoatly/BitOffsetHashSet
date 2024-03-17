@@ -6,77 +6,121 @@ using BenchmarkDotNet.Attributes;
 
 namespace Goatly.BitOffsetHashSets.PerformanceTests
 {
-    public class AddBenchmarks
+    public class Adding
     {
-        private HashSet<int> hashSet;
-        private BitOffsetHashSet bitOffsetHashSet;
-
-        [IterationSetup]
-        public void Setup()
+        public class HashSetBenchmarks
         {
-            this.hashSet = new HashSet<int>();
-            this.bitOffsetHashSet = new BitOffsetHashSet(4);
-        }
+            private HashSet<int> hashSet;
 
-        [Benchmark(Baseline = true, OperationsPerInvoke = 10)]
-        public void HashSetAdd()
-        {
-            for (int i = 0; i < 100; i++)
+            [IterationSetup]
+            public void Setup()
             {
-                this.hashSet.Add(i);
+                this.hashSet = new HashSet<int>();
+            }
+
+            [Params(1, 10, 100, 1000, 10000)]
+            public int Count { get; set; }
+
+            [Benchmark()]
+            public object AddSequential()
+            {
+                for (int i = 0; i < Count; i++)
+                {
+                    this.hashSet.Add(i);
+                }
+
+                return this.hashSet;
             }
         }
 
-        [Benchmark(OperationsPerInvoke = 100)]
-        public void BitOffsetHashSetAdd()
+        public class BitOffsetHashSetBenchmarks
         {
-            for (int i = 0; i < 10; i++)
+            private BitOffsetHashSet bitOffsetHashSet;
+
+            [IterationSetup]
+            public void Setup()
             {
-                this.bitOffsetHashSet.Add(i);
+                this.bitOffsetHashSet = new BitOffsetHashSet(4);
+            }
+
+            [Params(1, 10, 100, 1000, 10000)]
+            public int Count { get; set; }
+
+            [Benchmark()]
+            public object AddSequential()
+            {
+                for (int i = 0; i < Count; i++)
+                {
+                    this.bitOffsetHashSet.Add(i);
+                }
+
+                return this.bitOffsetHashSet;
             }
         }
     }
 
-    public class ContainsBenchmarks
+    public class Contains
     {
-        private HashSet<int> populatedHashSet;
-        private BitOffsetHashSet populatedBitOffsetHashSet;
-
-        [GlobalSetup]
-        public void Setup()
+        public class HashSetBenchmarks
         {
-            this.populatedHashSet = new HashSet<int>();
-            this.populatedBitOffsetHashSet = new BitOffsetHashSet(4);
+            private HashSet<int> populatedHashSet;
 
-            for (var i = 0; i < 100; i += 2)
+            [GlobalSetup]
+            public void Setup()
             {
-                this.populatedHashSet.Add(i);
-                this.populatedBitOffsetHashSet.Add(i);
+                this.populatedHashSet = new HashSet<int>();
+
+                for (var i = 0; i < Count; i += 2)
+                {
+                    this.populatedHashSet.Add(i);
+                }
+            }
+
+            [Params(1, 10, 100, 1000, 10000)]
+            public int Count { get; set; }
+
+            [Benchmark()]
+            public bool Contains()
+            {
+                var contains = false;
+                for (int i = 0; i < Count; i++)
+                {
+                    contains = this.populatedHashSet.Contains(i);
+                }
+
+                return contains;
             }
         }
 
-        [Benchmark(Baseline = true)]
-        public bool HashSetGet()
+        public class BitOffsetHashSetBenchmarks
         {
-            var contains = false;
-            for (int i = 0; i < 100; i++)
+            private BitOffsetHashSet populatedBitOffsetHashSet;
+
+            [GlobalSetup]
+            public void Setup()
             {
-                contains = this.populatedHashSet.Contains(i);
+                this.populatedBitOffsetHashSet = new BitOffsetHashSet(4);
+
+                for (var i = 0; i < Count; i += 2)
+                {
+                    this.populatedBitOffsetHashSet.Add(i);
+                }
             }
 
-            return contains;
-        }
+            [Params(1, 10, 100, 1000, 10000)]
+            public int Count { get; set; }
 
-        [Benchmark()]
-        public bool BitOffsetHashSetGet()
-        {
-            var contains = false;
-            for (int i = 0; i < 100; i++)
+            [Benchmark()]
+            public bool Contains()
             {
-                contains = this.populatedBitOffsetHashSet.Contains(i);
-            }
+                var contains = false;
+                for (int i = 0; i < Count; i++)
+                {
+                    contains = this.populatedBitOffsetHashSet.Contains(i);
+                }
 
-            return contains;
+                return contains;
+            }
         }
     }
 }

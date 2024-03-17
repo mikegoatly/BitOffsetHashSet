@@ -4,27 +4,15 @@ using System.Runtime.CompilerServices;
 
 namespace Goatly.BitOffsetHashSets
 {
-    /// <summary>
-    /// Configurations for the <see cref="BitOffsetHashSet"/> behaviors.
-    /// </summary>
-    public static class BitOffsetHashSetConfiguration
-    {
-        /// <summary>
-        /// Controls how much memory is allocated up-front for the internal cache of bit buffers.
-        /// Defaults to 64.
-        /// </summary>
-        public static int DefaultCacheChunkSize { get; set; } = 64;
-    }
-
-    public sealed class BitOffsetHashSet : IDisposable, IEnumerable<int>
+    public sealed class BitOffsetHashSet : IEnumerable<int>
     {
         private int count;
         private int baseOffset;
-        private Memory<ulong> bitData;
+        private ulong[] bitData;
 
-        public BitOffsetHashSet(int initialCapacity = 0)
+        public BitOffsetHashSet(int initialCapacity = 1)
         {
-            bitData = initialCapacity == 0 ? Memory<ulong>.Empty : BitBufferCache.Lease(initialCapacity);
+            bitData = new ulong[initialCapacity];
         }
 
         internal int BitDataBufferLength => bitData.Length;
@@ -51,11 +39,12 @@ namespace Goatly.BitOffsetHashSets
 
             EnsureCapacity(index + 1);
 
+            ref var slot = ref bitData[index];
             var bit = CalculateBit(value, index);
-            var alreadySet = (this.bitData.Span[index] & bit) != 0;
+            var alreadySet = (slot & bit) != 0;
             if (!alreadySet)
             {
-                this.bitData.Span[index] |= bit;
+                slot |= bit;
                 this.count++;
                 return true;
             }
@@ -76,7 +65,7 @@ namespace Goatly.BitOffsetHashSets
                 return false;
             }
 
-            return (this.bitData.Span[index] & CalculateBit(value, index)) != 0;
+            return (this.bitData[index] & CalculateBit(value, index)) != 0;
         }
 
         public bool Remove(int value)
@@ -93,12 +82,12 @@ namespace Goatly.BitOffsetHashSets
             }
 
             var bit = CalculateBit(value, index);
-            var current = this.bitData.Span[index];
+            var current = this.bitData[index];
             var alreadySet = (current & bit) != 0;
             if (alreadySet)
             {
                 var newValue = current & ~bit;
-                this.bitData.Span[index] = newValue;
+                this.bitData[index] = newValue;
                 this.count--;
 
                 return true;
@@ -110,7 +99,7 @@ namespace Goatly.BitOffsetHashSets
         public bool Compact()
         {
             int lastNonZeroBlock = bitData.Length - 1;
-            while (lastNonZeroBlock >= 0 && bitData.Span[lastNonZeroBlock] == 0)
+            while (lastNonZeroBlock >= 0 && bitData[lastNonZeroBlock] == 0)
             {
                 lastNonZeroBlock--;
             }
@@ -118,15 +107,14 @@ namespace Goatly.BitOffsetHashSets
             if (lastNonZeroBlock == -1)
             {
                 // The list is empty
-                BitBufferCache.Return(bitData);
-                bitData = Memory<ulong>.Empty;
+                bitData = [];
                 baseOffset = 0;
                 count = 0;
                 return true;
             }
 
             int firstNonZeroBlock = 0;
-            while (firstNonZeroBlock < bitData.Length && bitData.Span[firstNonZeroBlock] == 0)
+            while (firstNonZeroBlock < bitData.Length && bitData[firstNonZeroBlock] == 0)
             {
                 firstNonZeroBlock++;
             }
@@ -138,8 +126,7 @@ namespace Goatly.BitOffsetHashSets
             }
 
             // Request a new chunk of the right size
-            var newBitData = BitBufferCache.Lease(lastNonZeroBlock - firstNonZeroBlock + 1);
-            bitData.Span[firstNonZeroBlock..(lastNonZeroBlock + 1)].CopyTo(newBitData.Span);
+            var newBitData = bitData[firstNonZeroBlock..(lastNonZeroBlock + 1)];
 
             if (firstNonZeroBlock > 0)
             {
@@ -147,34 +134,24 @@ namespace Goatly.BitOffsetHashSets
                 baseOffset += firstNonZeroBlock * 64;
             }
 
-            var leadingZeroCount = BitOperations.LeadingZeroCount(newBitData.Span[0]);
+            var leadingZeroCount = BitOperations.LeadingZeroCount(newBitData[0]);
             if (leadingZeroCount > 0)
             {
                 // Shift all the data to the left
                 for (int i = 0; i < newBitData.Length - 1; i++)
                 {
-                    newBitData.Span[i] = (newBitData.Span[i] << leadingZeroCount) | (newBitData.Span[i + 1] >> (64 - leadingZeroCount));
+                    newBitData[i] = (newBitData[i] << leadingZeroCount) | (newBitData[i + 1] >> (64 - leadingZeroCount));
                 }
 
-                newBitData.Span[^1] = newBitData.Span[^1] << leadingZeroCount;
+                newBitData[^1] = newBitData[^1] << leadingZeroCount;
 
                 // Adjust the base offset
                 baseOffset -= leadingZeroCount;
             }
 
-            BitBufferCache.Return(bitData);
             bitData = newBitData;
 
             return true;
-        }
-
-        public void Dispose()
-        {
-            if (bitData.Length > 0)
-            {
-                BitBufferCache.Return(bitData);
-                bitData = null;
-            }
         }
 
         public IEnumerator<int> GetEnumerator()
@@ -184,7 +161,7 @@ namespace Goatly.BitOffsetHashSets
             int index = 0;
             while (enumeratedCount < count)
             {
-                ulong current = bitData.Span[index];
+                ulong current = bitData[index];
                 while (current != 0)
                 {
                     int bit = BitOperations.TrailingZeroCount(current);
@@ -205,13 +182,7 @@ namespace Goatly.BitOffsetHashSets
 
         public void Clear()
         {
-            if (bitData.Length > 0)
-            {
-                // Return the chunk to the cache
-                BitBufferCache.Return(bitData);
-            }
-
-            bitData = Memory<ulong>.Empty;
+            Array.Clear(this.bitData);
             count = 0;
         }
 
@@ -228,14 +199,13 @@ namespace Goatly.BitOffsetHashSets
 
             var extraLeadingBlocks = totalBitShift / 64;
             var blockBitShift = totalBitShift % 64;
-            var requiresOverflowToNewBlock = BitOperations.LeadingZeroCount(bitData.Span[^1]) < blockBitShift;
+            var requiresOverflowToNewBlock = BitOperations.LeadingZeroCount(bitData[^1]) < blockBitShift;
 
             // Determine if we need to allocate a new chunk
             if (requiresOverflowToNewBlock || extraLeadingBlocks > 0)
             {
-                var newBitData = BitBufferCache.Lease(bitData.Length + extraLeadingBlocks + (requiresOverflowToNewBlock ? 1 : 0));
-                bitData.Span.CopyTo(newBitData.Span[extraLeadingBlocks..]);
-                BitBufferCache.Return(bitData);
+                var newBitData = new ulong[bitData.Length + extraLeadingBlocks + (requiresOverflowToNewBlock ? 1 : 0)];
+                Array.Copy(bitData, 0, newBitData, extraLeadingBlocks, bitData.Length);
                 bitData = newBitData;
             }
 
@@ -248,16 +218,16 @@ namespace Goatly.BitOffsetHashSets
             // Work through the existing data and shift it, starting from the end, managing overflow into the next block
             for (int i = bitData.Length - 1; i >= extraLeadingBlocks; i--)
             {
-                ulong currentBlock = bitData.Span[i];
+                ulong currentBlock = bitData[i];
 
                 if (requiresOverflowToNewBlock)
                 {
                     // Shift the overflow block
-                    bitData.Span[i + 1] |= currentBlock >> (64 - blockBitShift);
+                    bitData[i + 1] |= currentBlock >> (64 - blockBitShift);
                 }
 
                 // Shift the current block
-                bitData.Span[i] = currentBlock << blockBitShift;
+                bitData[i] = currentBlock << blockBitShift;
             }
         }
 
@@ -266,14 +236,12 @@ namespace Goatly.BitOffsetHashSets
         {
             if (requiredBitDataSize >= bitData.Length)
             {
-                // We need to allocate a new chunk
-                var newBitData = BitBufferCache.Lease(requiredBitDataSize);
+                // We need to allocate a new chunk. If we're growing, we'll assume that's going to happen again soon
+                // so we'll resize to double capacity, or requiredBitDataSize, whichever is larger
+                var newBitData = new ulong[Math.Max(bitData.Length * 2, requiredBitDataSize)];
 
                 // Copy the existing data
-                bitData.Span.CopyTo(newBitData.Span);
-
-                // Return the old chunk
-                BitBufferCache.Return(bitData);
+                Array.Copy(bitData, 0, newBitData, 0, bitData.Length);
 
                 // Set the new chunk
                 bitData = newBitData;
@@ -283,14 +251,7 @@ namespace Goatly.BitOffsetHashSets
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private ulong CalculateBit(int value, int index)
         {
-            if (index == 0)
-            {
-                return (1UL << (value - baseOffset));
-            }
-            else
-            {
-                return (1UL << ((value - (index * 64)) - baseOffset));
-            }
+            return 1UL << (value - baseOffset - (index * 64));
         }
     }
 }

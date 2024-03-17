@@ -47,7 +47,6 @@ namespace Goatly.BitOffsetHashSets.PerformanceTests
             yield return MultimodalDistributionAnalyzer.Default;
             yield return RuntimeErrorAnalyser.Default;
             yield return ZeroMeasurementAnalyser.Default;
-            yield return BaselineCustomAnalyzer.Default;
         }
     }
 }
