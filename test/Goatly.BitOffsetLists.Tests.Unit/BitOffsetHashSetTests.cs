@@ -2,7 +2,7 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
 {
     public class BitOffsetHashSetTests
     {
-        private readonly BitOffsetHashSet sut;
+        private BitOffsetHashSet sut;
 
         public BitOffsetHashSetTests()
         {
@@ -28,6 +28,103 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
         }
 
         [Fact]
+        public void ConstructingFromExisting()
+        {
+            var original = new BitOffsetHashSet();
+
+            original.Add(100);
+            original.Add(101);
+
+            // Push the block size to 2
+            original.Add(140);
+            original.Remove(140);
+
+            this.sut = new BitOffsetHashSet(original);
+
+            Assert.True(original.Contains(100));
+            Assert.True(this.sut.Contains(101));
+
+            Assert.Equal(64, this.sut.BaseOffset);
+
+            Assert.True(this.sut.ToList().SequenceEqual([100, 101]));
+
+            // If we had done an enumeration copy, the buffer length would be 1 again
+            Assert.Equal(2, this.sut.BitDataBufferLength);
+        }
+
+        [Fact]
+        public void ConstructingFromList()
+        {
+            this.sut = new BitOffsetHashSet(
+                [
+                    100, 150, 300
+                ]);
+
+            Assert.Equal(3, this.sut.Count);
+            Assert.Equal(64, this.sut.BaseOffset);
+            Assert.True(this.sut.ToList().SequenceEqual([100, 150, 300]));
+        }
+
+        [Fact]
+        public void ConstructingFromHashSet()
+        {
+            this.sut = new BitOffsetHashSet(
+                new HashSet<int>() { 100, 150, 300 });
+
+            Assert.Equal(3, this.sut.Count);
+            Assert.Equal(64, this.sut.BaseOffset);
+            Assert.True(this.sut.ToList().SequenceEqual([100, 150, 300]));
+        }
+
+        [Fact]
+        public void ConstructingFromListWithDuplicates()
+        {
+            this.sut = new BitOffsetHashSet(
+                [
+                    300, 100, 150, 300, 100, 150
+                ]);
+
+            Assert.Equal(3, this.sut.Count);
+            Assert.Equal(64, this.sut.BaseOffset);
+            Assert.True(this.sut.ToList().SequenceEqual([100, 150, 300]));
+        }
+
+        [Fact]
+        public void ConstructingFromEnumerable()
+        {
+            static IEnumerable<int> Generator()
+            {
+                yield return 100;
+                yield return 150;
+                yield return 300;
+            }
+
+            this.sut = new BitOffsetHashSet(Generator());
+
+            Assert.Equal(64, this.sut.BaseOffset);
+            Assert.True(this.sut.ToList().SequenceEqual([100, 150, 300]));
+        }
+
+        [Fact]
+        public void ConstructingFromEnumerableWithDuplicates()
+        {
+            static IEnumerable<int> Generator()
+            {
+                yield return 300;
+                yield return 100;
+                yield return 150;
+                yield return 300;
+                yield return 100;
+                yield return 150;
+            }
+
+            this.sut = new BitOffsetHashSet(Generator());
+
+            Assert.Equal(64, this.sut.BaseOffset);
+            Assert.True(this.sut.ToList().SequenceEqual([100, 150, 300]));
+        }
+
+        [Fact]
         public void AddingIntoNonEmptyList_Within64()
         {
             this.sut.Add(100);
@@ -49,7 +146,7 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
         public void AddingIntoNonEmptyList_GreaterThan64()
         {
             this.sut.Add(100);
-            
+
             Assert.True(this.sut.Add(250));
 
             Assert.Equal(2, this.sut.Count);

@@ -1,4 +1,6 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -13,6 +15,92 @@ namespace Goatly.BitOffsetHashSets
         public BitOffsetHashSet(int initialCapacity = 1)
         {
             bitData = new ulong[initialCapacity];
+        }
+
+        public BitOffsetHashSet(IEnumerable<int> values)
+        {
+            if (values == null)
+            {
+                throw new ArgumentNullException(nameof(values));
+            }
+
+            if (values is BitOffsetHashSet other)
+            {
+                this.baseOffset = other.baseOffset;
+                this.count = other.count;
+                this.bitData = [.. other.bitData];
+            }
+            else
+            {
+                if (values is ISet<int> set)
+                {
+                    (this.baseOffset, this.bitData) = DeriveDataStructures(set);
+
+                    // With a set, we can assume that each value is unique, so the count will match
+                    this.count = set.Count;
+                    foreach (var value in set)
+                    {
+                        var index = (value - this.baseOffset) / 64;
+                        this.bitData[index] |= CalculateBit(value, index);
+                    }
+                }
+                else if (values is ICollection<int> collection)
+                {
+                    (this.baseOffset, this.bitData) = DeriveDataStructures(collection);
+
+                    // We can't assume that each value will be unique in a collection,
+                    // so we need to count them individually
+                    ref var count = ref this.count;
+
+                    foreach (var value in collection)
+                    {
+                        var index = (value - this.baseOffset) / 64;
+                        ref var slot = ref bitData[index];
+                        var bit = CalculateBit(value, index);
+                        if ((slot & bit) == 0)
+                        {
+                            slot |= bit;
+                            count++;
+                        }
+                    }
+                }
+                else
+                {
+                    // Last resort - just add each value individually
+                    this.bitData = new ulong[1];
+
+                    foreach (var value in values)
+                    {
+                        this.Add(value);
+                    }
+                }
+            }
+        }
+
+        private (int baseOffset, ulong[] bitData) DeriveDataStructures(ICollection<int> collection)
+        {
+            // Find the min/max values to work out the base offset and 
+            // appropriate size for the bit data buffer
+            int min = int.MaxValue;
+            int max = int.MinValue;
+            foreach (var value in collection)
+            {
+                if (value < min)
+                {
+                    min = value;
+                }
+
+                if (value > max)
+                {
+                    max = value;
+                }
+            }
+
+            return 
+            (
+                AlignTo64BitBoundary(min),
+                new ulong[(max - this.baseOffset) / 64 + 1]
+            );
         }
 
         internal int BaseOffset => baseOffset;
