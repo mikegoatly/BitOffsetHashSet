@@ -12,7 +12,7 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
         [Fact]
         public void AddingIntoEmptyList()
         {
-            Assert.Equal(0, this.sut.BitDataBufferLength);
+            Assert.Equal(1, this.sut.BitDataBufferLength);
 
             Assert.True(this.sut.Add(100));
 
@@ -150,11 +150,11 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
             this.sut.Add(100);
             this.sut.Add(350);
 
-            Assert.Equal(4, this.sut.BitDataBufferLength);
+            Assert.Equal(5, this.sut.BitDataBufferLength);
 
             Assert.True(this.sut.Remove(350));
 
-            Assert.Equal(4, this.sut.BitDataBufferLength);
+            Assert.Equal(5, this.sut.BitDataBufferLength);
 
             Assert.Equal(1, this.sut.Count);
 
@@ -170,12 +170,12 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
             this.sut.Add(350);
             this.sut.Add(500);
 
-            Assert.Equal(7, this.sut.BitDataBufferLength);
+            Assert.Equal(10, this.sut.BitDataBufferLength);
 
             this.sut.Remove(100);
             this.sut.Remove(500);
 
-            Assert.Equal(7, this.sut.BitDataBufferLength);
+            Assert.Equal(10, this.sut.BitDataBufferLength);
 
             this.sut.Compact();
 
@@ -191,8 +191,6 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
             this.sut.Add(101);
 
             this.sut.Clear();
-
-            Assert.Equal(0, this.sut.BitDataBufferLength);
 
             Assert.Equal(0, this.sut.Count);
         }

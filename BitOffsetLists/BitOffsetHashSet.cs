@@ -15,6 +15,8 @@ namespace Goatly.BitOffsetHashSets
             bitData = new ulong[initialCapacity];
         }
 
+        internal int BaseOffset => baseOffset;
+
         internal int BitDataBufferLength => bitData.Length;
 
         public int Count => count;
@@ -25,9 +27,9 @@ namespace Goatly.BitOffsetHashSets
             if (count == 0)
             {
                 index = 0;
-                baseOffset = value;
+                baseOffset = AlignTo64BitBoundary(value);
             }
-            else 
+            else
             {
                 if ((value < baseOffset))
                 {
@@ -82,12 +84,11 @@ namespace Goatly.BitOffsetHashSets
             }
 
             var bit = CalculateBit(value, index);
-            var current = this.bitData[index];
+            ref var current = ref this.bitData[index];
             var alreadySet = (current & bit) != 0;
             if (alreadySet)
             {
-                var newValue = current & ~bit;
-                this.bitData[index] = newValue;
+                current &= ~bit;
                 this.count--;
 
                 return true;
@@ -98,19 +99,19 @@ namespace Goatly.BitOffsetHashSets
 
         public bool Compact()
         {
-            int lastNonZeroBlock = bitData.Length - 1;
-            while (lastNonZeroBlock >= 0 && bitData[lastNonZeroBlock] == 0)
-            {
-                lastNonZeroBlock--;
-            }
-
-            if (lastNonZeroBlock == -1)
+            if (count == 0)
             {
                 // The list is empty
                 bitData = [];
                 baseOffset = 0;
                 count = 0;
                 return true;
+            }
+
+            int lastNonZeroBlock = bitData.Length - 1;
+            while (lastNonZeroBlock >= 0 && bitData[lastNonZeroBlock] == 0)
+            {
+                lastNonZeroBlock--;
             }
 
             int firstNonZeroBlock = 0;
@@ -132,21 +133,6 @@ namespace Goatly.BitOffsetHashSets
             {
                 // Adjust the base offset
                 baseOffset += firstNonZeroBlock * 64;
-            }
-
-            var leadingZeroCount = BitOperations.LeadingZeroCount(newBitData[0]);
-            if (leadingZeroCount > 0)
-            {
-                // Shift all the data to the left
-                for (int i = 0; i < newBitData.Length - 1; i++)
-                {
-                    newBitData[i] = (newBitData[i] << leadingZeroCount) | (newBitData[i + 1] >> (64 - leadingZeroCount));
-                }
-
-                newBitData[^1] = newBitData[^1] << leadingZeroCount;
-
-                // Adjust the base offset
-                baseOffset -= leadingZeroCount;
             }
 
             bitData = newBitData;
@@ -194,47 +180,20 @@ namespace Goatly.BitOffsetHashSets
             }
 
             // We need to bit shift existing data - possibly allocating a new chunk if we drop off to the right
+            newBaseOffset = AlignTo64BitBoundary(newBaseOffset);
             int totalBitShift = baseOffset - newBaseOffset;
             baseOffset = newBaseOffset;
-
             var extraLeadingBlocks = totalBitShift / 64;
-            var blockBitShift = totalBitShift % 64;
-            var requiresOverflowToNewBlock = BitOperations.LeadingZeroCount(bitData[^1]) < blockBitShift;
 
-            // Determine if we need to allocate a new chunk
-            if (requiresOverflowToNewBlock || extraLeadingBlocks > 0)
-            {
-                var newBitData = new ulong[bitData.Length + extraLeadingBlocks + (requiresOverflowToNewBlock ? 1 : 0)];
-                Array.Copy(bitData, 0, newBitData, extraLeadingBlocks, bitData.Length);
-                bitData = newBitData;
-            }
-
-            if (blockBitShift == 0)
-            {
-                // The new base offset is a multiple of 64, so we don't need to shift the data
-                return;
-            }
-
-            // Work through the existing data and shift it, starting from the end, managing overflow into the next block
-            for (int i = bitData.Length - 1; i >= extraLeadingBlocks; i--)
-            {
-                ulong currentBlock = bitData[i];
-
-                if (requiresOverflowToNewBlock)
-                {
-                    // Shift the overflow block
-                    bitData[i + 1] |= currentBlock >> (64 - blockBitShift);
-                }
-
-                // Shift the current block
-                bitData[i] = currentBlock << blockBitShift;
-            }
+            var newBitData = new ulong[bitData.Length + extraLeadingBlocks];
+            Array.Copy(bitData, 0, newBitData, extraLeadingBlocks, bitData.Length);
+            bitData = newBitData;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureCapacity(int requiredBitDataSize)
         {
-            if (requiredBitDataSize >= bitData.Length)
+            if (requiredBitDataSize > bitData.Length)
             {
                 // We need to allocate a new chunk. If we're growing, we'll assume that's going to happen again soon
                 // so we'll resize to double capacity, or requiredBitDataSize, whichever is larger
@@ -252,6 +211,15 @@ namespace Goatly.BitOffsetHashSets
         private ulong CalculateBit(int value, int index)
         {
             return 1UL << (value - baseOffset - (index * 64));
+        }
+
+        /// <summary>
+        /// Aligns a value to the start of a 64 bit boundary.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int AlignTo64BitBoundary(int value)
+        {
+            return value & ~63;
         }
     }
 }
