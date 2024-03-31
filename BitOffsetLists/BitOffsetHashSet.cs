@@ -1,62 +1,128 @@
-﻿using System;
-using System.Collections;
-using System.Diagnostics.CodeAnalysis;
+﻿using System.Collections;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace Goatly.BitOffsetHashSets
 {
+    internal record struct DataBlock(int BaseOffset, ulong[] Data)
+    {
+        public bool Contains(int value)
+        {
+            if (value < this.BaseOffset)
+            {
+                return false;
+            }
+
+            int index = (value - this.BaseOffset) / 64;
+            if (index >= this.Data.Length)
+            {
+                return false;
+            }
+
+            return (this.Data[index] & CalculateBit(value, index)) != 0;
+        }
+
+        public bool Remove(int value)
+        {
+            if (value < this.BaseOffset)
+            {
+                return false;
+            }
+
+            int index = (value - this.BaseOffset) / 64;
+            if (index >= this.Data.Length)
+            {
+                return false;
+            }
+
+            var bit = CalculateBit(value, index);
+            ref var current = ref this.Data[index];
+            var alreadySet = (current & bit) != 0;
+            if (alreadySet)
+            {
+                current &= ~bit;
+                return true;
+            }
+
+            return false;
+        }
+
+        public void Clear()
+        {
+            Array.Clear(this.Data);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly ulong CalculateBit(int value, int index)
+        {
+            return 1UL << (value - this.BaseOffset - (index * 64));
+        }
+
+        public readonly DataBlock ShiftBaseTo(int newBaseOffset)
+        {
+            if (newBaseOffset >= this.BaseOffset)
+            {
+                throw new ArgumentOutOfRangeException(nameof(newBaseOffset), "The new base offset must be less than the current base offset");
+            }
+
+            newBaseOffset = newBaseOffset.AlignTo64BitBoundary();
+            int totalBitShift = this.BaseOffset - newBaseOffset;
+            var extraLeadingBlocks = totalBitShift / 64;
+
+            var data = this.Data;
+            var newBitData = new ulong[data.Length + extraLeadingBlocks];
+            Array.Copy(data, 0, newBitData, extraLeadingBlocks, data.Length);
+            return new DataBlock(newBaseOffset, newBitData);
+        }
+    }
+
     public sealed class BitOffsetHashSet : IEnumerable<int>
     {
         private int count;
-        private int baseOffset;
-        private ulong[] bitData;
+        private DataBlock dataBlock;
 
         public BitOffsetHashSet(int initialCapacity = 1)
         {
-            bitData = new ulong[initialCapacity];
+            count = 0;
+            dataBlock = new DataBlock(0, new ulong[initialCapacity]);
         }
 
         public BitOffsetHashSet(IEnumerable<int> values)
         {
-            if (values == null)
-            {
-                throw new ArgumentNullException(nameof(values));
-            }
+            ArgumentNullException.ThrowIfNull(values);
 
             if (values is BitOffsetHashSet other)
             {
-                this.baseOffset = other.baseOffset;
-                this.count = other.count;
-                this.bitData = [.. other.bitData];
+                count = other.count;
+                this.dataBlock = other.dataBlock;
             }
             else
             {
                 if (values is ISet<int> set)
                 {
-                    (this.baseOffset, this.bitData) = DeriveDataStructures(set);
+                    this.dataBlock = DeriveDataStructures(set);
+                    var (baseOffset, data) = this.dataBlock;
 
                     // With a set, we can assume that each value is unique, so the count will match
                     this.count = set.Count;
                     foreach (var value in set)
                     {
-                        var index = (value - this.baseOffset) / 64;
-                        this.bitData[index] |= CalculateBit(value, index);
+                        var index = (value - baseOffset) / 64;
+                        data[index] |= this.dataBlock.CalculateBit(value, index);
                     }
                 }
                 else if (values is ICollection<int> collection)
                 {
-                    (this.baseOffset, this.bitData) = DeriveDataStructures(collection);
+                    this.dataBlock = DeriveDataStructures(collection);
 
                     // We can't assume that each value will be unique in a collection,
                     // so we need to count them individually
                     ref var count = ref this.count;
-
                     foreach (var value in collection)
                     {
-                        var index = (value - this.baseOffset) / 64;
-                        ref var slot = ref bitData[index];
-                        var bit = CalculateBit(value, index);
+                        var index = (value - this.dataBlock.BaseOffset) / 64;
+                        ref var slot = ref dataBlock.Data[index];
+                        var bit = this.dataBlock.CalculateBit(value, index);
                         if ((slot & bit) == 0)
                         {
                             slot |= bit;
@@ -67,17 +133,17 @@ namespace Goatly.BitOffsetHashSets
                 else
                 {
                     // Last resort - just add each value individually
-                    this.bitData = new ulong[1];
+                    this.dataBlock = new DataBlock(0, new ulong[1]);
 
                     foreach (var value in values)
                     {
-                        this.Add(value);
+                        Add(value);
                     }
                 }
             }
         }
 
-        private (int baseOffset, ulong[] bitData) DeriveDataStructures(ICollection<int> collection)
+        private DataBlock DeriveDataStructures(ICollection<int> collection)
         {
             // Find the min/max values to work out the base offset and 
             // appropriate size for the bit data buffer
@@ -96,16 +162,15 @@ namespace Goatly.BitOffsetHashSets
                 }
             }
 
-            return 
-            (
-                AlignTo64BitBoundary(min),
-                new ulong[(max - this.baseOffset) / 64 + 1]
-            );
+            var baseOffset = min.AlignTo64BitBoundary();
+            return new DataBlock(
+                baseOffset,
+                new ulong[(max - baseOffset) / 64 + 1]);
         }
 
-        internal int BaseOffset => baseOffset;
+        internal int BaseOffset => dataBlock.BaseOffset;
 
-        internal int BitDataBufferLength => bitData.Length;
+        internal int BitDataBufferLength => dataBlock.Data.Length;
 
         public int Count => count;
 
@@ -115,22 +180,22 @@ namespace Goatly.BitOffsetHashSets
             if (count == 0)
             {
                 index = 0;
-                baseOffset = AlignTo64BitBoundary(value);
+                this.dataBlock = this.dataBlock with { BaseOffset = value.AlignTo64BitBoundary() };
             }
             else
             {
-                if ((value < baseOffset))
+                if ((value < dataBlock.BaseOffset))
                 {
-                    ShiftBaseTo(value);
+                    this.dataBlock = this.dataBlock.ShiftBaseTo(value);
                 }
 
-                index = (value - baseOffset) / 64;
+                index = (value - dataBlock.BaseOffset) / 64;
             }
 
             EnsureCapacity(index + 1);
 
-            ref var slot = ref bitData[index];
-            var bit = CalculateBit(value, index);
+            ref var slot = ref dataBlock.Data[index];
+            var bit = this.dataBlock.CalculateBit(value, index);
             var alreadySet = (slot & bit) != 0;
             if (!alreadySet)
             {
@@ -144,86 +209,59 @@ namespace Goatly.BitOffsetHashSets
 
         public bool Contains(int value)
         {
-            if (value < baseOffset)
-            {
-                return false;
-            }
-
-            int index = (value - baseOffset) / 64;
-            if (index >= bitData.Length)
-            {
-                return false;
-            }
-
-            return (this.bitData[index] & CalculateBit(value, index)) != 0;
+            return this.dataBlock.Contains(value);
         }
 
         public bool Remove(int value)
         {
-            if (value < baseOffset)
+            var removed = this.dataBlock.Remove(value);
+            if (removed)
             {
-                return false;
-            }
-
-            int index = (value - baseOffset) / 64;
-            if (index >= bitData.Length)
-            {
-                return false;
-            }
-
-            var bit = CalculateBit(value, index);
-            ref var current = ref this.bitData[index];
-            var alreadySet = (current & bit) != 0;
-            if (alreadySet)
-            {
-                current &= ~bit;
                 this.count--;
-
-                return true;
             }
 
-            return false;
+            return removed;
         }
 
         public bool Compact()
         {
             if (count == 0)
             {
-                // The list is empty
-                bitData = [];
-                baseOffset = 0;
-                count = 0;
+                dataBlock = new DataBlock(0, []);
                 return true;
             }
 
-            int lastNonZeroBlock = bitData.Length - 1;
-            while (lastNonZeroBlock >= 0 && bitData[lastNonZeroBlock] == 0)
+            var (_, data) = dataBlock;
+            var length = data.Length;
+            int lastNonZeroBlock = length - 1;
+            while (lastNonZeroBlock >= 0 && data[lastNonZeroBlock] == 0)
             {
                 lastNonZeroBlock--;
             }
 
             int firstNonZeroBlock = 0;
-            while (firstNonZeroBlock < bitData.Length && bitData[firstNonZeroBlock] == 0)
+            while (firstNonZeroBlock < length && data[firstNonZeroBlock] == 0)
             {
                 firstNonZeroBlock++;
             }
 
-            if (firstNonZeroBlock == 0 && lastNonZeroBlock == bitData.Length - 1)
+            if (firstNonZeroBlock == 0 && lastNonZeroBlock == length - 1)
             {
                 // No need to compact
                 return false;
             }
 
             // Request a new chunk of the right size
-            var newBitData = bitData[firstNonZeroBlock..(lastNonZeroBlock + 1)];
+            var newBitData = data[firstNonZeroBlock..(lastNonZeroBlock + 1)];
 
             if (firstNonZeroBlock > 0)
             {
-                // Adjust the base offset
-                baseOffset += firstNonZeroBlock * 64;
+                this.dataBlock = new DataBlock(dataBlock.BaseOffset + firstNonZeroBlock * 64, newBitData);
             }
-
-            bitData = newBitData;
+            else
+            {
+                this.dataBlock = this.dataBlock with { Data = newBitData };
+            }
 
             return true;
         }
@@ -231,11 +269,11 @@ namespace Goatly.BitOffsetHashSets
         public IEnumerator<int> GetEnumerator()
         {
             int enumeratedCount = 0;
-            int offset = baseOffset;
+            int offset = dataBlock.BaseOffset;
             int index = 0;
             while (enumeratedCount < count)
             {
-                ulong current = bitData[index];
+                ulong current = dataBlock.Data[index];
                 while (current != 0)
                 {
                     int bit = BitOperations.TrailingZeroCount(current);
@@ -251,63 +289,24 @@ namespace Goatly.BitOffsetHashSets
 
         IEnumerator IEnumerable.GetEnumerator()
         {
-            return this.GetEnumerator();
+            return GetEnumerator();
         }
 
         public void Clear()
         {
-            Array.Clear(this.bitData);
             count = 0;
-        }
-
-        private void ShiftBaseTo(int newBaseOffset)
-        {
-            if (newBaseOffset >= baseOffset)
-            {
-                throw new ArgumentOutOfRangeException(nameof(newBaseOffset), "The new base offset must be less than the current base offset");
-            }
-
-            // We need to bit shift existing data - possibly allocating a new chunk if we drop off to the right
-            newBaseOffset = AlignTo64BitBoundary(newBaseOffset);
-            int totalBitShift = baseOffset - newBaseOffset;
-            baseOffset = newBaseOffset;
-            var extraLeadingBlocks = totalBitShift / 64;
-
-            var newBitData = new ulong[bitData.Length + extraLeadingBlocks];
-            Array.Copy(bitData, 0, newBitData, extraLeadingBlocks, bitData.Length);
-            bitData = newBitData;
+            dataBlock.Clear();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureCapacity(int requiredBitDataSize)
         {
-            if (requiredBitDataSize > bitData.Length)
+            if (requiredBitDataSize > dataBlock.Data.Length)
             {
-                // We need to allocate a new chunk. If we're growing, we'll assume that's going to happen again soon
-                // so we'll resize to double capacity, or requiredBitDataSize, whichever is larger
-                var newBitData = new ulong[Math.Max(bitData.Length * 2, requiredBitDataSize)];
-
-                // Copy the existing data
-                Array.Copy(bitData, 0, newBitData, 0, bitData.Length);
-
-                // Set the new chunk
-                bitData = newBitData;
+                var newBitData = new ulong[Math.Max(dataBlock.Data.Length * 2, requiredBitDataSize)];
+                Array.Copy(dataBlock.Data, 0, newBitData, 0, dataBlock.Data.Length);
+                dataBlock = new DataBlock(dataBlock.BaseOffset, newBitData);
             }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private ulong CalculateBit(int value, int index)
-        {
-            return 1UL << (value - baseOffset - (index * 64));
-        }
-
-        /// <summary>
-        /// Aligns a value to the start of a 64 bit boundary.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int AlignTo64BitBoundary(int value)
-        {
-            return value & ~63;
         }
     }
 }

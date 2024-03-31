@@ -104,6 +104,17 @@ namespace Goatly.BitOffsetHashSets.PerformanceTests
 
                 return this.bitOffsetHashSet;
             }
+
+            [Benchmark()]
+            public object AddRandomSparse()
+            {
+                for (int i = 0; i < Count; i++)
+                {
+                    this.bitOffsetHashSet.Add(random.Next());
+                }
+
+                return this.bitOffsetHashSet;
+            }
         }
     }
 

@@ -101,6 +101,7 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
 
             this.sut = new BitOffsetHashSet(Generator());
 
+            Assert.Equal(3, this.sut.Count);
             Assert.Equal(64, this.sut.BaseOffset);
             Assert.True(this.sut.ToList().SequenceEqual([100, 150, 300]));
         }
@@ -120,6 +121,7 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
 
             this.sut = new BitOffsetHashSet(Generator());
 
+            Assert.Equal(3, this.sut.Count);
             Assert.Equal(64, this.sut.BaseOffset);
             Assert.True(this.sut.ToList().SequenceEqual([100, 150, 300]));
         }
