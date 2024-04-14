@@ -1,15 +1,32 @@
 ﻿using System.Collections;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 
 namespace Goatly.BitOffsetHashSets
 {
-    internal record struct DataBlock(int BaseOffset, ulong[] Data)
+    internal record struct DataBlock()
     {
-        public int MaxPossibleValue => this.BaseOffset + (this.Data.Length * 64) - 1;
+        public DataBlock(int baseOffset, ulong[] data)
+            : this()
+        {
+            this.BaseOffset = baseOffset;
+            this.Data = data;
+            this.MaxPossibleValue = baseOffset + (data.Length * 64) - 1;
+        }
 
-        public bool Contains(int value)
+        public DataBlock(DataBlock other)
+            : this()
+        {
+            this.BaseOffset = other.BaseOffset;
+            this.Data = [.. other.Data];
+            this.MaxPossibleValue = other.MaxPossibleValue;
+        }
+
+        public int MaxPossibleValue { get; }
+        public int BaseOffset { get; }
+        public ulong[] Data { get; }
+
+        public readonly bool Contains(int value)
         {
             if (value < this.BaseOffset)
             {
@@ -25,7 +42,7 @@ namespace Goatly.BitOffsetHashSets
             return (this.Data[index] & CalculateBit(value, index)) != 0;
         }
 
-        public bool Remove(int value)
+        public readonly bool Remove(int value)
         {
             if (value < this.BaseOffset)
             {
@@ -50,7 +67,8 @@ namespace Goatly.BitOffsetHashSets
             return false;
         }
 
-        public void Clear()
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly void Clear()
         {
             Array.Clear(this.Data);
         }
@@ -101,21 +119,23 @@ namespace Goatly.BitOffsetHashSets
 
     public sealed class BitOffsetHashSet : IEnumerable<int>
     {
+        internal const int DefaultInitialCapacity = 4;
+
         /// <summary>
-        /// To avoid big empty gaps in the data, we'll add a new sparse block when the gap between a new value and existing values
+        /// To avoid big empty gaps in the data, we'll add a new block when the gap between a new value and existing values
         /// is greater than this.
         /// </summary>
         internal const int SparseGap = 64 * 10;
-        private const int InitialCapacity = 1;
+        private readonly int initialCapacity = DefaultInitialCapacity;
 
         private int count;
-        private DataBlock dataBlock;
-        private List<DataBlock>? sparseBlocks;
+        private DataBlock[] dataBlocks = new DataBlock[1];
 
-        public BitOffsetHashSet(int initialCapacity = InitialCapacity)
+        public BitOffsetHashSet(int initialCapacity = DefaultInitialCapacity)
         {
             count = 0;
-            dataBlock = new DataBlock(0, new ulong[initialCapacity]);
+            this.initialCapacity = initialCapacity;
+            this.dataBlocks[0] = new DataBlock(0, new ulong[initialCapacity]);
         }
 
         public BitOffsetHashSet(IEnumerable<int> values)
@@ -125,14 +145,12 @@ namespace Goatly.BitOffsetHashSets
             if (values is BitOffsetHashSet other)
             {
                 count = other.count;
-                this.dataBlock = new DataBlock { BaseOffset = other.dataBlock.BaseOffset, Data = [.. other.dataBlock.Data] };
-                // TODO Test cloning with sparse blocks
-                this.sparseBlocks = other.sparseBlocks is null ? null : new List<DataBlock>(other.sparseBlocks);
+                this.dataBlocks = other.dataBlocks.Select(b => new DataBlock(b)).ToArray();
             }
             else
             {
                 // This may be optimisable.
-                this.dataBlock = new DataBlock(0, new ulong[InitialCapacity]);
+                this.dataBlocks[0] = new DataBlock(0, new ulong[initialCapacity]);
                 foreach (var value in values)
                 {
                     Add(value);
@@ -140,8 +158,8 @@ namespace Goatly.BitOffsetHashSets
             }
         }
 
-        internal DataBlock CoreBlock => this.dataBlock;
-        internal List<DataBlock>? SparseBlocks => this.sparseBlocks;
+        internal DataBlock CoreBlock => this.dataBlocks[0];
+        internal List<DataBlock>? SparseBlocks => this.dataBlocks.Length > 1 ? [.. this.dataBlocks[1..]] : null;
 
         public int Count => count;
 
@@ -149,13 +167,11 @@ namespace Goatly.BitOffsetHashSets
         {
             if (count == 0)
             {
-                this.dataBlock = this.dataBlock with { BaseOffset = value.AlignTo64BitBoundary() };
-                this.dataBlock.Data[0] = this.dataBlock.CalculateBit(value, 0);
-                this.count = 1;
+                InitializeFirstEntry(value);
                 return true;
             }
 
-            ref var dataBlock = ref FindDataBlockForAddition(value);
+            var dataBlock = FindDataBlockForAddition(value);
 
             var index = (value - dataBlock.BaseOffset) / 64;
             ref var slot = ref dataBlock.Data[index];
@@ -171,141 +187,130 @@ namespace Goatly.BitOffsetHashSets
             return false;
         }
 
-        private ref DataBlock FindDataBlockForAddition(int value)
+        private void InitializeFirstEntry(int value)
         {
-            // The core datablock will contain the lower bound of the values, so if the value is lower than that
-            // we either need to shift the core block or create a new block and move this one to the sparse list
-            if ((value < this.dataBlock.BaseOffset))
+            ref var dataBlock = ref this.dataBlocks[0];
+            dataBlock = new DataBlock(value.AlignTo64BitBoundary(), dataBlock.Data);
+            dataBlock.Data[0] = dataBlock.CalculateBit(value, 0);
+            this.count = 1;
+        }
+
+        private DataBlock FindDataBlockForAddition(int value)
+        {
+            // Look for the first block that can contain the value
+            for (int i = 0; i < this.dataBlocks.Length; i++)
             {
-                var lowerGap = dataBlock.BaseOffset - value;
-                if (lowerGap > SparseGap)
+                // We get a ref to the block because at some point we may need to mutate it
+                ref var dataBlock = ref this.dataBlocks[i];
+
+                if (value < dataBlock.BaseOffset)
                 {
-                    // Move the current core block to the sparse list
-                    this.sparseBlocks ??= [this.dataBlock];
-
-                    // TODO - initial size?
-                    this.dataBlock = new DataBlock(value.AlignTo64BitBoundary(), new ulong[InitialCapacity]);
-                    return ref this.dataBlock;
-                }
-
-                // Just shift the core block
-                this.dataBlock = this.dataBlock.ShiftBaseTo(value);
-                return ref this.dataBlock;
-            }
-
-            var maxExpandableValue = Math.Min(
-                this.dataBlock.MaxPossibleValue + SparseGap,
-                this.sparseBlocks is null ? int.MaxValue : this.sparseBlocks[0].BaseOffset - 1);
-
-            if (value > maxExpandableValue)
-            {
-                if (this.sparseBlocks is null)
-                {
-                    // Just create the sparse blocks with a new block to fit the value
-                    // TODO - initial size?
-                    this.sparseBlocks = [new DataBlock(value.AlignTo64BitBoundary(), new ulong[InitialCapacity])];
-                    return ref CollectionsMarshal.AsSpan(this.sparseBlocks)[0];
-                }
-
-                // Look for a sparse block that can contain the value
-                var collectionSpan = CollectionsMarshal.AsSpan(this.sparseBlocks);
-                for (int i = 0; i < collectionSpan.Length; i++)
-                {
-                    ref DataBlock block = ref collectionSpan[i];
-
-                    if (value < block.BaseOffset)
+                    if (value < dataBlock.BaseOffset - SparseGap)
                     {
-                        if (value < block.BaseOffset - SparseGap)
-                        {
-                            // In this case we need to insert a new block before this one
-                            // TODO - initial size?
-                            this.sparseBlocks.Insert(i, new DataBlock(value.AlignTo64BitBoundary(), new ulong[InitialCapacity]));
-                            return ref CollectionsMarshal.AsSpan(this.sparseBlocks)[i];
-                        }
-
-                        // Shift the base offset of this block
-                        block = block.ShiftBaseTo(value);
-                        return ref block;
+                        // In this case we need to insert a new block before this one
+                        // TODO - initial size?
+                        var insertedBlock = new DataBlock(value.AlignTo64BitBoundary(), new ulong[initialCapacity]);
+                        this.dataBlocks = [.. this.dataBlocks[0..i], insertedBlock, .. this.dataBlocks[i..]];
+                        return insertedBlock;
                     }
 
-                    // The maximum possible value this block can contain is block.MaxPossibleValue + SparseGap, OR the min - 1 of the next block
-                    maxExpandableValue = Math.Min(
-                        block.MaxPossibleValue + SparseGap,
-                        i == collectionSpan.Length - 1 ? int.MaxValue : collectionSpan[i + 1].BaseOffset - 1);
-
-                    if (value >= block.BaseOffset && value <= maxExpandableValue)
-                    {
-                        // This block fits, expand if necessary
-                        EnsureCapacity(ref block, value, maxExpandableValue);
-                        return ref block;
-                    }
+                    // Shift the base offset of this block
+                    dataBlock = dataBlock.ShiftBaseTo(value);
+                    return dataBlock;
                 }
 
-                // No block found, create a new one
-                // TODO - initial size?
-                this.sparseBlocks.Add(new DataBlock(value.AlignTo64BitBoundary(), new ulong[InitialCapacity]));
-                return ref CollectionsMarshal.AsSpan(this.sparseBlocks)[^1];
+                if (value <= dataBlock.MaxPossibleValue)
+                {
+                    return dataBlock;
+                }
 
+                // The maximum possible value this block can contain is block.MaxPossibleValue + SparseGap, OR the min - 1 of the next block
+                var maxExpandableValue = Math.Min(
+                    dataBlock.MaxPossibleValue + SparseGap,
+                    i == this.dataBlocks.Length - 1 ? int.MaxValue : this.dataBlocks[i + 1].BaseOffset - 1);
+
+                if (value >= dataBlock.BaseOffset && value <= maxExpandableValue)
+                {
+                    // This block fits, expand if necessary
+                    EnsureCapacity(ref dataBlock, value, maxExpandableValue);
+                    return dataBlock;
+                }
             }
 
-            // Just use the core block, expanding as necessary
-            EnsureCapacity(ref this.dataBlock, value, maxExpandableValue);
-            return ref this.dataBlock;
+            // No block found, create a new one
+            var newBlock = new DataBlock(value.AlignTo64BitBoundary(), new ulong[initialCapacity]);
+            this.dataBlocks = [.. this.dataBlocks, newBlock];
+            return newBlock;
         }
 
         public bool Contains(int value)
         {
-            ref var dataBlock = ref FindDataBlockForValue(value);
-            return dataBlock.Contains(value);
+            if (FindDataBlockForValue(value, out var dataBlock))
+            {
+                return dataBlock.Contains(value);
+            }
+
+            return false;
         }
 
-        private ref DataBlock FindDataBlockForValue(int value)
+        private bool FindDataBlockForValue(int value, out DataBlock dataBlock)
         {
-            if (this.sparseBlocks == null)
+            // Find the first block for which the value is less than the max value. 
+            for (int i = 0; i < this.dataBlocks.Length; i++)
             {
-                return ref this.dataBlock;
-            }
-
-            if (value > this.dataBlock.MaxPossibleValue)
-            {
-                var collectionSpan = CollectionsMarshal.AsSpan(this.sparseBlocks);
-                for (int i = 0; i < collectionSpan.Length; i++)
+                dataBlock = this.dataBlocks[i];
+                if (value <= dataBlock.MaxPossibleValue)
                 {
-                    ref DataBlock block = ref collectionSpan[i];
-                    if (value >= block.BaseOffset && value <= block.MaxPossibleValue)
-                    {
-                        return ref block;
-                    }
+                    return true;
                 }
-
-                return ref this.dataBlock;
             }
 
-            return ref this.dataBlock;
+            dataBlock = default;
+            return false;
         }
 
         public bool Remove(int value)
         {
-            ref var dataBlock = ref FindDataBlockForValue(value);
-
-            var removed = dataBlock.Remove(value);
-            if (removed)
+            if (FindDataBlockForValue(value, out var dataBlock))
             {
-                this.count--;
+                var removed = dataBlock.Remove(value);
+                if (removed)
+                {
+                    this.count--;
+                }
+
+                return removed;
             }
 
-            return removed;
+            return false;
         }
 
         public bool Compact()
         {
             if (count == 0)
             {
-                dataBlock = new DataBlock(0, []);
+                this.dataBlocks = [new DataBlock(0, new ulong[initialCapacity])];
                 return true;
             }
 
-            var (_, data) = dataBlock;
+            var compacted = false;
+            this.dataBlocks = this.dataBlocks
+                .Select(Compact)
+                .Where(static result => result.IsEmpty == false)
+                .Select(result =>
+                {
+                    compacted |= result.IsCompacted;
+                    return result.DataBlock;
+                })
+                .ToArray();
+
+
+            return compacted;
+        }
+
+        private static CompactionResult Compact(DataBlock dataBlock)
+        {
+            var data = dataBlock.Data;
             var length = data.Length;
             int lastNonZeroBlock = length - 1;
             while (lastNonZeroBlock >= 0 && data[lastNonZeroBlock] == 0)
@@ -319,10 +324,16 @@ namespace Goatly.BitOffsetHashSets
                 firstNonZeroBlock++;
             }
 
+            if (firstNonZeroBlock == length)
+            {
+                // The block is empty
+                return new CompactionResult(dataBlock, false, true);
+            }
+
             if (firstNonZeroBlock == 0 && lastNonZeroBlock == length - 1)
             {
                 // No need to compact
-                return false;
+                return new CompactionResult(dataBlock, false, false);
             }
 
             // Request a new chunk of the right size
@@ -330,15 +341,17 @@ namespace Goatly.BitOffsetHashSets
 
             if (firstNonZeroBlock > 0)
             {
-                this.dataBlock = new DataBlock(dataBlock.BaseOffset + firstNonZeroBlock * 64, newBitData);
+                dataBlock = new DataBlock(dataBlock.BaseOffset + firstNonZeroBlock * 64, newBitData);
             }
             else
             {
-                this.dataBlock = this.dataBlock with { Data = newBitData };
+                dataBlock = new DataBlock(dataBlock.BaseOffset, newBitData);
             }
 
-            return true;
+            return new CompactionResult(dataBlock, true, false);
         }
+
+        private record CompactionResult(DataBlock DataBlock, bool IsCompacted, bool IsEmpty);
 
         public IEnumerator<int> GetEnumerator()
         {
@@ -347,21 +360,11 @@ namespace Goatly.BitOffsetHashSets
 
         private IEnumerable<int> EnumerateItems()
         {
-            var dataBlock = this.dataBlock;
-
-            foreach (var item in dataBlock.EnumerateItems())
+            foreach (var dataBlock in this.dataBlocks)
             {
-                yield return item;
-            }
-
-            if (this.sparseBlocks is not null)
-            {
-                foreach (var sparseBlock in this.sparseBlocks)
+                foreach (var item in dataBlock.EnumerateItems())
                 {
-                    foreach (var item in sparseBlock.EnumerateItems())
-                    {
-                        yield return item;
-                    }
+                    yield return item;
                 }
             }
         }
@@ -373,16 +376,13 @@ namespace Goatly.BitOffsetHashSets
 
         public void Clear()
         {
-            count = 0;
-            dataBlock.Clear();
+            this.count = 0;
 
-            if (this.sparseBlocks is not null)
-            {
-                foreach (var block in this.sparseBlocks)
-                {
-                    block.Clear();
-                }
-            }
+            // We need to reset to just a single data block here, otherwise we will
+            // confuse the initialisation process when adding the first element again.
+            var dataBlock = this.dataBlocks[0];
+            this.dataBlocks = [dataBlock];
+            dataBlock.Clear();
         }
 
         private void EnsureCapacity(ref DataBlock dataBlock, int value, int maxExpandableValue)
@@ -401,18 +401,20 @@ namespace Goatly.BitOffsetHashSets
                 // But we also need to ensure it's *at least* the required block count.
                 if (requiredBlockCount > newBlockCount)
                 {
+#if DEBUG
                     if (requiredBlockCount > maxBlockCount)
                     {
                         // This *shouldn't* happen - guards in other logic should be making sure of it.
                         throw new InvalidOperationException("Unexpected attempt to grow a data block into a neighboring sparse block.");
                     }
+#endif
 
                     newBlockCount = requiredBlockCount;
                 }
 
                 var newBitData = new ulong[newBlockCount];
                 Array.Copy(dataBlock.Data, 0, newBitData, 0, length);
-                dataBlock = dataBlock with { Data = newBitData };
+                dataBlock = new DataBlock(dataBlock.BaseOffset, newBitData);
             }
         }
     }

@@ -6,7 +6,7 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
 
         public BitOffsetHashSetTests()
         {
-            this.sut = [];
+            this.sut = new BitOffsetHashSet(1);
         }
 
         [Fact]
@@ -30,7 +30,7 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
         [Fact]
         public void ConstructingFromExisting()
         {
-            var original = new BitOffsetHashSet();
+            var original = new BitOffsetHashSet(1);
 
             original.Add(100);
             original.Add(101);
@@ -435,6 +435,29 @@ namespace Goatly.BitOffsetHashSets.Tests.Unit
             Assert.Single(this.sut.CoreBlock.Data);
 
             Assert.True(this.sut.ToList().SequenceEqual([350]));
+        }
+
+        [Fact]
+        public void CompactingShouldRemoveEmptyAdditionalBlocks()
+        {
+            this.sut.Add(100);
+            this.sut.Add(3500);
+            this.sut.Add(500);
+
+            Assert.Single(this.sut.SparseBlocks!);
+
+            this.sut.Remove(100);
+            this.sut.Remove(3500);
+
+            Assert.Equal(7, this.sut.CoreBlock.Data.Length);
+            Assert.Single(this.sut.SparseBlocks!);
+
+            this.sut.Compact();
+
+            Assert.Single(this.sut.CoreBlock.Data);
+            Assert.Null(sut.SparseBlocks);
+
+            Assert.True(this.sut.ToList().SequenceEqual([500]));
         }
 
         [Fact]
