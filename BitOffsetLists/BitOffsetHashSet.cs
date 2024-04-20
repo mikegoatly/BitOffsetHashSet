@@ -1,90 +1,130 @@
 ﻿using System.Collections;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Goatly.BitOffsetHashSets
 {
-    internal record struct DataBlock(int BaseOffset, ulong[] Data)
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DataBlock()
     {
-        public bool Contains(int value)
+        private const int DataBlockElementCount = 4;
+        private const int MaxValueCapacity = (DataBlockElementCount * 64) - 1;
+
+        private ulong data1;
+        private ulong data2;
+        private ulong data3;
+        private ulong data4;
+
+        public DataBlock(int initialValue)
+            : this()
         {
-            if (value < this.BaseOffset)
-            {
-                return false;
-            }
-
-            int index = (value - this.BaseOffset) / 64;
-            if (index >= this.Data.Length)
-            {
-                return false;
-            }
-
-            return (this.Data[index] & CalculateBit(value, index)) != 0;
+            this.BaseOffset = initialValue.AlignTo256BitBoundary();
+            this.MaxPossibleValue = this.BaseOffset + MaxValueCapacity;
         }
 
-        public bool Remove(int value)
+        public readonly int MaxPossibleValue { get; }
+
+        public int BaseOffset { get; }
+
+        public readonly bool HasData => this.data1 > 0 || this.data2 > 0 || this.data3 > 0 || this.data4 > 0;
+
+        public readonly IEnumerable<int> EnumerateItems()
         {
-            if (value < this.BaseOffset)
-            {
-                return false;
-            }
+            int offset = this.BaseOffset;
 
-            int index = (value - this.BaseOffset) / 64;
-            if (index >= this.Data.Length)
-            {
-                return false;
-            }
+            return EnumerateItems(offset, this.data1)
+                .Concat(EnumerateItems(offset + 64, this.data2))
+                .Concat(EnumerateItems(offset + 128, this.data3))
+                .Concat(EnumerateItems(offset + 192, this.data4));
+        }
 
-            var bit = CalculateBit(value, index);
-            ref var current = ref this.Data[index];
-            var alreadySet = (current & bit) != 0;
-            if (alreadySet)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal bool Add(int value)
+        {
+            var relativeValue = this.CalculateRelativeValue(value);
+
+            ref var dataSlot = ref this.CalculateSlot(relativeValue);
+            var bit = CalculateBit(relativeValue);
+            if ((dataSlot & bit) == 0)
             {
-                current &= ~bit;
+                dataSlot |= bit;
                 return true;
             }
 
             return false;
         }
 
-        public void Clear()
+
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal bool Remove(int value)
         {
-            Array.Clear(this.Data);
+            var relativeValue = this.CalculateRelativeValue(value);
+
+            ref var dataSlot = ref this.CalculateSlot(relativeValue);
+            var bit = CalculateBit(relativeValue);
+            if ((dataSlot & bit) != 0)
+            {
+                dataSlot &= ~bit;
+                return true;
+            }
+
+            return false;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public readonly ulong CalculateBit(int value, int index)
+        internal readonly bool Contains(int value)
         {
-            return 1UL << (value - this.BaseOffset - (index * 64));
+            var relativeValue = this.CalculateRelativeValue(value);
+
+            ref var dataSlot = ref this.CalculateSlot(relativeValue);
+
+            return (dataSlot & CalculateBit(relativeValue)) != 0;
         }
 
-        public readonly DataBlock ShiftBaseTo(int newBaseOffset)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static IEnumerable<int> EnumerateItems(int baseOffset, ulong data)
         {
-            if (newBaseOffset >= this.BaseOffset)
+            while (data != 0)
             {
-                throw new ArgumentOutOfRangeException(nameof(newBaseOffset), "The new base offset must be less than the current base offset");
+                int bit = BitOperations.TrailingZeroCount(data);
+                yield return baseOffset + bit;
+                data &= data - 1;
             }
+        }
 
-            newBaseOffset = newBaseOffset.AlignTo64BitBoundary();
-            int totalBitShift = this.BaseOffset - newBaseOffset;
-            var extraLeadingBlocks = totalBitShift / 64;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private readonly int CalculateRelativeValue(int value)
+        {
+            return value - this.BaseOffset;
+        }
 
-            var data = this.Data;
-            var newBitData = new ulong[data.Length + extraLeadingBlocks];
-            Array.Copy(data, 0, newBitData, extraLeadingBlocks, data.Length);
-            return new DataBlock(newBaseOffset, newBitData);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static ulong CalculateBit(int relativeValue)
+        {
+            return 1UL << relativeValue;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private readonly unsafe ref ulong CalculateSlot(int relativeValue)
+        {
+            fixed (ulong* ptr = &data1)
+            {
+                return ref ptr[relativeValue / 64];
+            }
         }
     }
 
     public sealed class BitOffsetHashSet : IEnumerable<int>
     {
         private int count;
-        private DataBlock dataBlock;
+        private DataBlock[] dataBlocks;
+        private int dataBlockCount;
 
         public BitOffsetHashSet(int initialCapacity = 1)
         {
-            count = 0;
-            dataBlock = new DataBlock(0, new ulong[initialCapacity]);
+            this.dataBlocks = new DataBlock[initialCapacity];
         }
 
         public BitOffsetHashSet(IEnumerable<int> values)
@@ -93,113 +133,33 @@ namespace Goatly.BitOffsetHashSets
 
             if (values is BitOffsetHashSet other)
             {
-                count = other.count;
-                this.dataBlock = other.dataBlock;
+                this.count = other.count;
+                this.dataBlockCount = other.dataBlockCount;
+                this.dataBlocks = [.. other.dataBlocks];
             }
             else
             {
-                if (values is ISet<int> set)
-                {
-                    this.dataBlock = DeriveDataStructures(set);
-                    var (baseOffset, data) = this.dataBlock;
+                // This is be optimisable - at the very least check to see if this implements ICollection and get a count,
+                // and approximate an initial index size from that.
+                this.dataBlocks = new DataBlock[1];
 
-                    // With a set, we can assume that each value is unique, so the count will match
-                    this.count = set.Count;
-                    foreach (var value in set)
-                    {
-                        var index = (value - baseOffset) / 64;
-                        data[index] |= this.dataBlock.CalculateBit(value, index);
-                    }
-                }
-                else if (values is ICollection<int> collection)
+                foreach (var value in values)
                 {
-                    this.dataBlock = DeriveDataStructures(collection);
-
-                    // We can't assume that each value will be unique in a collection,
-                    // so we need to count them individually
-                    ref var count = ref this.count;
-                    foreach (var value in collection)
-                    {
-                        var index = (value - this.dataBlock.BaseOffset) / 64;
-                        ref var slot = ref dataBlock.Data[index];
-                        var bit = this.dataBlock.CalculateBit(value, index);
-                        if ((slot & bit) == 0)
-                        {
-                            slot |= bit;
-                            count++;
-                        }
-                    }
-                }
-                else
-                {
-                    // Last resort - just add each value individually
-                    this.dataBlock = new DataBlock(0, new ulong[1]);
-
-                    foreach (var value in values)
-                    {
-                        Add(value);
-                    }
+                    Add(value);
                 }
             }
         }
 
-        private DataBlock DeriveDataStructures(ICollection<int> collection)
-        {
-            // Find the min/max values to work out the base offset and 
-            // appropriate size for the bit data buffer
-            int min = int.MaxValue;
-            int max = int.MinValue;
-            foreach (var value in collection)
-            {
-                if (value < min)
-                {
-                    min = value;
-                }
-
-                if (value > max)
-                {
-                    max = value;
-                }
-            }
-
-            var baseOffset = min.AlignTo64BitBoundary();
-            return new DataBlock(
-                baseOffset,
-                new ulong[(max - baseOffset) / 64 + 1]);
-        }
-
-        internal int BaseOffset => dataBlock.BaseOffset;
-
-        internal int BitDataBufferLength => dataBlock.Data.Length;
+        internal IList<DataBlock> DataBlocks => this.dataBlocks.Take(this.dataBlockCount).ToList();
 
         public int Count => count;
 
         public bool Add(int value)
         {
-            int index;
-            if (count == 0)
-            {
-                index = 0;
-                this.dataBlock = this.dataBlock with { BaseOffset = value.AlignTo64BitBoundary() };
-            }
-            else
-            {
-                if ((value < dataBlock.BaseOffset))
-                {
-                    this.dataBlock = this.dataBlock.ShiftBaseTo(value);
-                }
+            ref var dataBlock = ref FindDataBlockForAddition(value);
 
-                index = (value - dataBlock.BaseOffset) / 64;
-            }
-
-            EnsureCapacity(index + 1);
-
-            ref var slot = ref dataBlock.Data[index];
-            var bit = this.dataBlock.CalculateBit(value, index);
-            var alreadySet = (slot & bit) != 0;
-            if (!alreadySet)
+            if (dataBlock.Add(value))
             {
-                slot |= bit;
                 this.count++;
                 return true;
             }
@@ -207,83 +167,177 @@ namespace Goatly.BitOffsetHashSets
             return false;
         }
 
+        private ref DataBlock FindDataBlockForAddition(int value)
+        {
+            // Binary search for the first block that can contain the value
+            // If we can't find a block, we need to insert a new one in the correct place.
+            int left = 0;
+            var dataBlocks = this.dataBlocks;
+            int right = dataBlockCount - 1;
+            while (left <= right)
+            {
+                int mid = left + ((right - left) / 2);
+                ref var dataBlock = ref dataBlocks[mid];
+
+                if (value < dataBlock.BaseOffset)
+                {
+                    right = mid - 1;
+                }
+                else if (value > dataBlock.MaxPossibleValue)
+                {
+                    left = mid + 1;
+                }
+                else
+                {
+                    return ref dataBlock;
+                }
+            }
+
+            // If we get here, the value is outside the range of all blocks.
+            // We need to insert a new block at the correct position.
+            this.InsertDataBlock(left, new DataBlock(value));
+            return ref this.dataBlocks[left];
+        }
+
+        private unsafe void InsertDataBlock(int left, DataBlock newBlock)
+        {
+            if (this.dataBlocks.Length == this.dataBlockCount)
+            {
+                var newDataBlocks = new DataBlock[this.dataBlockCount * 2];
+
+                if (left > 0)
+                {
+                    fixed (DataBlock* target = &newDataBlocks[0])
+                    fixed (DataBlock* src = &this.dataBlocks[0])
+                    {
+                        var size = left * sizeof(DataBlock);
+                        Buffer.MemoryCopy(src, target, size, size);
+                    }
+                }
+
+                newDataBlocks[left] = newBlock;
+
+                if (left < this.dataBlockCount)
+                {
+                    fixed (DataBlock* target = &newDataBlocks[left + 1])
+                    fixed (DataBlock* src = &this.dataBlocks[left])
+                    {
+                        var size = (this.dataBlockCount - left) * sizeof(DataBlock);
+                        Buffer.MemoryCopy(src, target, size, size);
+                    }
+                }
+
+                this.dataBlocks = newDataBlocks;
+            }
+            else
+            {
+                if (left < this.dataBlockCount)
+                {
+                    fixed (DataBlock* src = &this.dataBlocks[left])
+                    {
+                        var size = (this.dataBlockCount - left) * sizeof(DataBlock);
+
+                        // Buffer.MemoryCopy is safe to use with overlapping data: https://learn.microsoft.com/en-us/dotnet/api/system.buffer.memorycopy?view=net-8.0
+                        Buffer.MemoryCopy(src, src + 1, size, size);
+                    }
+                }
+
+                this.dataBlocks[left] = newBlock;
+            }
+
+            this.dataBlockCount++;
+        }
+
         public bool Contains(int value)
         {
-            return this.dataBlock.Contains(value);
+            var index = this.BinarySearchDataBlock(value);
+            if (index >= 0)
+            {
+                ref var dataBlock = ref this.dataBlocks[index];
+                return dataBlock.Contains(value);
+            }
+
+            return false;
         }
 
         public bool Remove(int value)
         {
-            var removed = this.dataBlock.Remove(value);
-            if (removed)
+            var index = this.BinarySearchDataBlock(value);
+            if (index >= 0)
             {
-                this.count--;
+                ref var dataBlock = ref dataBlocks[index];
+                if (dataBlock.Remove(value))
+                {
+                    this.count--;
+                    return true;
+                }
             }
 
-            return removed;
+            return false;
+        }
+
+        private int BinarySearchDataBlock(int value)
+        {
+            // Binary search for the first block that can contain the value
+            int left = 0;
+            var dataBlocks = this.dataBlocks;
+            int right = this.dataBlockCount - 1;
+            while (left <= right)
+            {
+                int mid = left + ((right - left) / 2);
+                ref var dataBlock = ref dataBlocks[mid];
+
+                if (value < dataBlock.BaseOffset)
+                {
+                    right = mid - 1;
+                }
+                else if (value > dataBlock.MaxPossibleValue)
+                {
+                    left = mid + 1;
+                }
+                else
+                {
+                    return mid;
+                }
+            }
+
+            // If we get here, the value is outside the range of all blocks.
+            return -1;
         }
 
         public bool Compact()
         {
             if (count == 0)
             {
-                dataBlock = new DataBlock(0, []);
+                this.dataBlocks = [];
                 return true;
             }
 
-            var (_, data) = dataBlock;
-            var length = data.Length;
-            int lastNonZeroBlock = length - 1;
-            while (lastNonZeroBlock >= 0 && data[lastNonZeroBlock] == 0)
-            {
-                lastNonZeroBlock--;
-            }
+            var initialSize = dataBlockCount;
 
-            int firstNonZeroBlock = 0;
-            while (firstNonZeroBlock < length && data[firstNonZeroBlock] == 0)
-            {
-                firstNonZeroBlock++;
-            }
+            this.dataBlocks = this.dataBlocks
+                .Take(this.dataBlockCount)
+                .Where(x => x.HasData)
+                .ToArray();
 
-            if (firstNonZeroBlock == 0 && lastNonZeroBlock == length - 1)
-            {
-                // No need to compact
-                return false;
-            }
+            this.dataBlockCount = this.dataBlocks.Length;
 
-            // Request a new chunk of the right size
-            var newBitData = data[firstNonZeroBlock..(lastNonZeroBlock + 1)];
-
-            if (firstNonZeroBlock > 0)
-            {
-                this.dataBlock = new DataBlock(dataBlock.BaseOffset + firstNonZeroBlock * 64, newBitData);
-            }
-            else
-            {
-                this.dataBlock = this.dataBlock with { Data = newBitData };
-            }
-
-            return true;
+            return this.dataBlockCount < initialSize;
         }
 
         public IEnumerator<int> GetEnumerator()
         {
-            int enumeratedCount = 0;
-            int offset = dataBlock.BaseOffset;
-            int index = 0;
-            while (enumeratedCount < count)
-            {
-                ulong current = dataBlock.Data[index];
-                while (current != 0)
-                {
-                    int bit = BitOperations.TrailingZeroCount(current);
-                    yield return offset + bit;
-                    current &= current - 1;
-                    enumeratedCount++;
-                }
+            return EnumerateItems().GetEnumerator();
+        }
 
-                offset += 64;
-                index++;
+        private IEnumerable<int> EnumerateItems()
+        {
+            for (var i = 0; i < this.dataBlockCount; i++)
+            {
+                foreach (var item in this.dataBlocks[i].EnumerateItems())
+                {
+                    yield return item;
+                }
             }
         }
 
@@ -294,19 +348,8 @@ namespace Goatly.BitOffsetHashSets
 
         public void Clear()
         {
-            count = 0;
-            dataBlock.Clear();
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void EnsureCapacity(int requiredBitDataSize)
-        {
-            if (requiredBitDataSize > dataBlock.Data.Length)
-            {
-                var newBitData = new ulong[Math.Max(dataBlock.Data.Length * 2, requiredBitDataSize)];
-                Array.Copy(dataBlock.Data, 0, newBitData, 0, dataBlock.Data.Length);
-                dataBlock = new DataBlock(dataBlock.BaseOffset, newBitData);
-            }
+            this.count = 0;
+            this.dataBlockCount = 0;
         }
     }
 }

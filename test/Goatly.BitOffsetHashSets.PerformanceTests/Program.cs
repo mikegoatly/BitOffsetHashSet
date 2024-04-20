@@ -6,7 +6,8 @@ namespace Goatly.BitOffsetHashSets.PerformanceTests
     {
         public static void Main(string[] args)
         {
-            BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).RunAllJoined(BenchmarkConfig.Get());
+            BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly)
+                .RunAllJoined(BenchmarkConfig.Get());
         }
     }
 }
