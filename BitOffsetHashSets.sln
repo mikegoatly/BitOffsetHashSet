@@ -7,7 +7,12 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Goatly.BitOffsetHashSets", 
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Goatly.BitOffsetHashSets.Tests.Unit", "test\Goatly.BitOffsetLists.Tests.Unit\Goatly.BitOffsetHashSets.Tests.Unit.csproj", "{C4F2F696-1E57-4815-B571-93E5B3477EF8}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Goatly.BitOffsetHashSets.PerformanceTests", "test\Goatly.BitOffsetHashSets.PerformanceTests\Goatly.BitOffsetHashSets.PerformanceTests.csproj", "{8F5D38D1-CC38-4927-8720-81067C9BF47E}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Goatly.BitOffsetHashSets.PerformanceTests", "test\Goatly.BitOffsetHashSets.PerformanceTests\Goatly.BitOffsetHashSets.PerformanceTests.csproj", "{8F5D38D1-CC38-4927-8720-81067C9BF47E}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{8EE38213-9948-4758-B8C6-1560CBB74D81}"
+	ProjectSection(SolutionItems) = preProject
+		README.md = README.md
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
